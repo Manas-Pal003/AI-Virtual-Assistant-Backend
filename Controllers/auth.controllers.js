@@ -1,23 +1,151 @@
 import User from "../Models/user.model.js";
 import bcrypt from "bcryptjs";
+import jwt from "jsonwebtoken";
+
+const generateToken = (userId) => {
+  return jwt.sign(
+    { userId },
+    process.env.JWT_SECRET,
+    { expiresIn: "15d" }
+  );
+};
 
 export const registerUser = async (req, res) => {
-    try {
-        const {name, email, password} = req.body;
-        const existEmail = await User.findOne({ email });
-        if(existEmail){
-            return res.status(400).json({message: "Email already exists"});
-        }
-        if(password.length < 6){
-            return res.status(400).json({message: "Password must be at least 6 characters long"});
-        }
-        const hashedPassword = await bcrypt.hash(password, 10);
-        
+  try {
+    const { name, email, password } = req.body;
 
-        const user = await User.create({name, email, password: hashedPassword});
-        res.status(201).json({message: "User created successfully", user});
-    } catch (error) {
-        console.error("Register user error:", error);
-        res.status(500).json({message: "Internal server error"});
+    if (!name || !email || !password) {
+      return res.status(400).json({
+        message: "Name, email and password are required",
+      });
     }
+
+    if (password.length < 6) {
+      return res.status(400).json({
+        message: "Password must be at least 6 characters long",
+      });
+    }
+
+    const existEmail = await User.findOne({ email });
+
+    if (existEmail) {
+      return res.status(400).json({
+        message: "Email already exists",
+      });
+    }
+
+    const hashedPassword = await bcrypt.hash(password, 10);
+
+    const user = await User.create({
+      name,
+      email,
+      password: hashedPassword,
+    });
+
+    const token = generateToken(user._id);
+
+    res.cookie("token", token, {
+      maxAge: 15 * 24 * 60 * 60 * 1000,
+      httpOnly: true,
+      sameSite: "lax",
+      secure: false,
+    });
+
+    return res.status(201).json({
+      message: "User created successfully",
+      user: {
+        _id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role || "User",
+      },
+      token,
+    });
+  } catch (error) {
+    console.error("Register user error:", error);
+
+    return res.status(500).json({
+      message: "Internal server error",
+      error: error.message,
+    });
+  }
+};
+
+export const loginUser = async (req, res) => {
+  try {
+    const { email, password } = req.body;
+
+    if (!email || !password) {
+      return res.status(400).json({
+        message: "Email and password are required",
+      });
+    }
+
+    const user = await User.findOne({ email });
+
+    if (!user) {
+      return res.status(404).json({
+        message: "User not found",
+      });
+    }
+
+    const isPasswordValid = await bcrypt.compare(password, user.password);
+
+    if (!isPasswordValid) {
+      return res.status(401).json({
+        message: "Invalid password",
+      });
+    }
+
+    const token = generateToken(user._id);
+
+    res.cookie("token", token, {
+      maxAge: 15 * 24 * 60 * 60 * 1000,
+      httpOnly: true,
+      sameSite: "lax",
+      secure: false,
+    });
+
+    return res.status(200).json({
+      message: "Login successful",
+      user: {
+        _id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role || "User",
+        assistantName: user.assistantName,
+        assistantImage: user.assistantImage,
+      },
+      token,
+    });
+  } catch (error) {
+    console.error("Login user error:", error);
+
+    return res.status(500).json({
+      message: "Internal server error",
+      error: error.message,
+    });
+  }
+};
+
+export const logoutUser = async (req, res) => {
+  try {
+    res.cookie("token", "", {
+      maxAge: 0,
+      httpOnly: true,
+      sameSite: "lax",
+      secure: false,
+    });
+
+    return res.status(200).json({
+      message: "Logout successful",
+    });
+  } catch (error) {
+    console.error("Logout user error:", error);
+
+    return res.status(500).json({
+      message: "Internal server error",
+      error: error.message,
+    });
+  }
 };

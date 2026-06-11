@@ -16,9 +16,11 @@ const userSchema = new mongoose.Schema({
     },
     assistantName: {
         type: String,
+        default:""  
     },
     assistantImage: {
         type: String,
+        default:""  
     },
     history: [
         { type: String }
