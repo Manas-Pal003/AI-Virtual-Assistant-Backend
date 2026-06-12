@@ -1,3 +1,4 @@
+
 import express from "express";
 import dotenv from "dotenv";
 import connectDB from "./Config/Db.js";
@@ -5,6 +6,7 @@ import cors from "cors";
 import cookieParser from "cookie-parser";
 import authRouter from "./Routes/auth.routes.js";
 import userRouter from "./Routes/user.routes.js";
+import assistantRouter from "./Routes/assistant.routes.js";
 
 dotenv.config();
 
@@ -26,6 +28,7 @@ app.use("/public", express.static("public"));
 
 app.use("/api/auth", authRouter);
 app.use("/api/users", userRouter);
+app.use("/api/assistant", assistantRouter);
 
 connectDB();
 
