@@ -25,7 +25,8 @@ const userSchema = new mongoose.Schema({
     history: [
         {
             role: { type: String, enum: ["user", "assistant"] },
-            text: { type: String }
+            text: { type: String },
+            url: { type: String }
         }
     ]
     // avatar: {
