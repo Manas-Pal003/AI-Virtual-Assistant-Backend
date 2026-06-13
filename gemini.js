@@ -1,48 +1,41 @@
-const geminiResponse = async (prompt) => {
-  try {
-    const apiUrl = process.env.GEMINI_API_URL;
+import { init } from "@heyputer/puter.js/src/init.cjs";
 
-    if (!apiUrl) {
-      throw new Error("GEMINI_API_URL is not defined in environment variables.");
+let puter = null;
+
+const initPuter = () => {
+  if (!puter) {
+    const token = process.env.PUTER_API_TOKEN;
+    if (!token) {
+      throw new Error("PUTER_API_TOKEN is not defined in .env");
     }
+    puter = init(token);
+  }
+  return puter;
+};
 
+const aiResponse = async (prompt) => {
+  try {
     if (!prompt) {
       throw new Error("Prompt is required.");
     }
 
-    const response = await fetch(apiUrl, {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        contents: [
-          {
-            parts: [
-              {
-                text: prompt,
-              },
-            ],
-          },
-        ],
-      }),
+    const p = initPuter();
+
+    const response = await p.ai.chat(prompt, {
+      model: "gpt-4o-mini",
     });
 
-    const data = await response.json();
-
-    if (!response.ok) {
-      throw new Error(data.error?.message || "Failed to get response from Gemini.");
-    }
-
     const text =
-      data?.candidates?.[0]?.content?.parts?.[0]?.text ||
-      "No response from Gemini.";
+      response?.message?.content ||
+      response?.text ||
+      (typeof response === "string" ? response : null) ||
+      "No response from AI.";
 
     return text;
   } catch (error) {
-    console.error("Error in Gemini API call:", error.message);
-    return "Sorry, something went wrong while getting AI response.";
+    console.error("Error in Puter AI call:", error.message);
+    return `⚠️ AI Error: ${error.message}`;
   }
 };
 
-export default geminiResponse;
+export default aiResponse;

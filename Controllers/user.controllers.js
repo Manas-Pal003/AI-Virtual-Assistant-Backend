@@ -75,3 +75,33 @@ export const customizeAssistant = async (req, res) => {
     });
   }
 };
+
+export const clearChatHistory = async (req, res) => {
+  try {
+    const userId = req.userId;
+
+    const user = await User.findByIdAndUpdate(
+      userId,
+      { history: [] },
+      { new: true }
+    ).select("-password");
+
+    if (!user) {
+      return res.status(404).json({
+        message: "User not found",
+      });
+    }
+
+    return res.status(200).json({
+      message: "Chat history cleared successfully",
+      user,
+    });
+  } catch (error) {
+    console.log("Clear chat history error:", error);
+
+    return res.status(500).json({
+      message: "Internal server error",
+      error: error.message,
+    });
+  }
+};

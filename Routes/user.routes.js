@@ -4,6 +4,7 @@ import { upload } from "../Middleware/multer.js";
 import {
   getUserData,
   customizeAssistant,
+  clearChatHistory,
 } from "../Controllers/user.controllers.js";
 
 const router = express.Router();
@@ -16,5 +17,7 @@ router.post(
   upload.single("assistantImage"),
   customizeAssistant
 );
+
+router.post("/clear-history", isAuth, clearChatHistory);
 
 export default router;

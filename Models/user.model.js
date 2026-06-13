@@ -23,7 +23,10 @@ const userSchema = new mongoose.Schema({
         default:""  
     },
     history: [
-        { type: String }
+        {
+            role: { type: String, enum: ["user", "assistant"] },
+            text: { type: String }
+        }
     ]
     // avatar: {
     //     type: String,
