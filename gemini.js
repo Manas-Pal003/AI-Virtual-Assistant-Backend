@@ -33,8 +33,24 @@ const aiResponse = async (prompt) => {
 
     return text;
   } catch (error) {
-    console.error("Error in Puter AI call:", error.message);
-    return `⚠️ AI Error: ${error.message}`;
+    console.error("Error in Puter AI call:", error);
+    let errMsg = "Unknown error";
+    if (error) {
+      if (typeof error === "string") {
+        errMsg = error;
+      } else if (error.message) {
+        errMsg = error.message;
+      } else if (error.error) {
+        errMsg = typeof error.error === "object" ? JSON.stringify(error.error) : String(error.error);
+      } else {
+        try {
+          errMsg = JSON.stringify(error);
+        } catch (e) {
+          errMsg = String(error);
+        }
+      }
+    }
+    return `⚠️ AI Error: ${errMsg}`;
   }
 };
 

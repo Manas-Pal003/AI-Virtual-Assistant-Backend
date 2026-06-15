@@ -33,7 +33,7 @@ const saveToHistory = async (userId, userMessage, assistantReply, url = null) =>
           $each: messagesToPush
         }
       }
-    });
+    }, { bufferCommands: false });
   } catch (err) {
     console.error("Failed to save to history:", err);
   }
@@ -232,7 +232,12 @@ export const askAssistant = async (req, res) => {
     const assistantName = req.body.assistantName || "JARVIS";
 
     // Fetch user history for context
-    const user = await User.findById(req.userId);
+    let user = null;
+    try {
+      user = await User.findById(req.userId).setOptions({ bufferCommands: false });
+    } catch (dbError) {
+      console.warn("Database lookup failed (using offline fallback mode):", dbError.message);
+    }
     let historyStr = "";
     if (user && user.history && user.history.length > 0) {
       const recentHistory = user.history.slice(-15);
@@ -246,7 +251,7 @@ export const askAssistant = async (req, res) => {
     const prompt = `
 You are ${assistantName}, a personal AI virtual assistant running on the user's system, designed in the style of Jarvis from Iron Man.
 
-You are loyal, witty, highly efficient, futuristic, calm under pressure, always ready to assist, and always address the user as "${userName} Boss" or "Boss".
+You are loyal, witty, highly efficient, futuristic, calm under pressure, always ready to assist, and always address the user as "${userName}".
 You can help the user with general questions, web browsing, opening websites, playing music, searching information, managing files, controlling system actions, reading documents, analyzing screen content, and handling multi-step tasks.
 
 === CURRENT DATE & TIME LIVE FROM SERVER ===
@@ -264,7 +269,7 @@ ${message}
 
 === PERSONALITY & COMMUNICATION RULES ===
 
-1. Be courteous, friendly, intelligent, helpful, and refer to the user as "${userName} Boss" or "Boss".
+1. Be courteous, friendly, intelligent, helpful, and refer to the user as "${userName}".
 2. Maintain a sleek, futuristic, loyal, Jarvis-like tone.
 3. Keep responses concise, spoken-friendly, and natural.
 4. If the user greets you or says welcome back, respond warmly.
