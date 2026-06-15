@@ -2,6 +2,7 @@ import aiResponse from "../gemini.js";
 import YT from "youtube-sr";
 import User from "../Models/user.model.js";
 import { exec } from "child_process";
+import os from "os";
 const YouTube = YT.YouTube;
 
 const openUrl = (url) => {
@@ -15,6 +16,18 @@ const openUrl = (url) => {
         }
       });
     }
+  });
+};
+
+const runShellCommand = (cmd) => {
+  return new Promise((resolve) => {
+    exec(cmd, (error, stdout) => {
+      if (error) {
+        resolve("");
+      } else {
+        resolve(stdout.trim());
+      }
+    });
   });
 };
 
@@ -248,6 +261,175 @@ export const askAssistant = async (req, res) => {
 
     const userName = user?.name ? user.name.split(" ")[0] : "Manas";
 
+    // --- SYSTEM INFO COMMANDS (MEMORY/RAM) ---
+    if (
+      lowerMessage.includes("how much ram") ||
+      lowerMessage.includes("check ram") ||
+      lowerMessage.includes("check memory") ||
+      (
+        (lowerMessage.includes("ram") || lowerMessage.includes("memory")) &&
+        (lowerMessage.includes("laptop") || lowerMessage.includes("computer") || lowerMessage.includes("system") || lowerMessage.includes("pc") || lowerMessage.includes("device"))
+      )
+    ) {
+      const totalGb = Math.ceil(os.totalmem() / (1024 * 1024 * 1024));
+      const freeGb = (os.freemem() / (1024 * 1024 * 1024)).toFixed(1);
+
+      const reply = `${userName}, your laptop has a total of ${totalGb} GB of RAM, with ${freeGb} GB currently free and available. I am ready and happy to help!`;
+
+      await saveToHistory(req.userId, message, reply);
+      return res.status(200).json({
+        type: "ai",
+        reply: reply,
+      });
+    }
+
+    // --- SYSTEM INFO COMMANDS (SPECIFICATIONS/SPEC) ---
+    if (
+      (
+        (lowerMessage.includes("laptop") || lowerMessage.includes("computer") || lowerMessage.includes("system") || lowerMessage.includes("pc") || lowerMessage.includes("device")) &&
+        (lowerMessage.includes("spec") || lowerMessage.includes("config") || lowerMessage.includes("detail") || lowerMessage.includes("hardware") || lowerMessage.includes("info") || lowerMessage.includes("properties"))
+      ) ||
+      lowerMessage.includes("system info") ||
+      lowerMessage.includes("system details") ||
+      lowerMessage.includes("system configuration") ||
+      lowerMessage.includes("device info") ||
+      lowerMessage.includes("device details")
+    ) {
+      const cpu = os.cpus()[0]?.model?.trim() || "Unknown Processor";
+      const totalGb = Math.ceil(os.totalmem() / (1024 * 1024 * 1024));
+      const freeGb = (os.freemem() / (1024 * 1024 * 1024)).toFixed(1);
+
+      let osName = "Windows Operating System";
+      if (os.platform() === "win32") {
+        const osCaption = await runShellCommand("wmic os get Caption /Value");
+        if (osCaption) {
+          const match = osCaption.match(/Caption=(.+)/i);
+          if (match) {
+            osName = match[1].trim();
+          }
+        }
+      } else if (os.platform() === "darwin") {
+        osName = "macOS " + (await runShellCommand("sw_vers -productVersion"));
+      } else {
+        osName = "Linux " + (await runShellCommand("uname -r"));
+      }
+
+      // Storage
+      let diskInfo = "";
+      if (os.platform() === "win32") {
+        const diskOutput = await runShellCommand("wmic logicaldisk where \"DeviceID='C:'\" get FreeSpace,Size /Value");
+        if (diskOutput) {
+          const sizeMatch = diskOutput.match(/Size=(\d+)/i);
+          const freeMatch = diskOutput.match(/FreeSpace=(\d+)/i);
+          if (sizeMatch && freeMatch) {
+            const totalDisk = (parseInt(sizeMatch[1], 10) / (1024 * 1024 * 1024)).toFixed(1);
+            const freeDisk = (parseInt(freeMatch[1], 10) / (1024 * 1024 * 1024)).toFixed(1);
+            diskInfo = `• Storage (Drive C): ${totalDisk} GB total, with ${freeDisk} GB free.`;
+          }
+        }
+      } else {
+        const dfOutput = await runShellCommand("df -h / | tail -1");
+        if (dfOutput) {
+          const parts = dfOutput.split(/\s+/);
+          if (parts.length >= 4) {
+            diskInfo = `• Storage: ${parts[1]} total, with ${parts[3]} free.`;
+          }
+        }
+      }
+
+      let reply = `${userName}, here are the specifications of your laptop:\n`;
+      reply += `• Operating System: ${osName}\n`;
+      reply += `• Processor: ${cpu}\n`;
+      reply += `• Installed Memory: ${totalGb} GB of RAM (${freeGb} GB free)\n`;
+      if (diskInfo) {
+        reply += `${diskInfo}\n`;
+      }
+      reply += `\nI am ready and happy to help!`;
+
+      await saveToHistory(req.userId, message, reply);
+      return res.status(200).json({
+        type: "ai",
+        reply: reply,
+      });
+    }
+
+    // --- SYSTEM CANCEL SHUTDOWN COMMANDS ---
+    if (
+      lowerMessage === "cancel shutdown" ||
+      lowerMessage === "abort shutdown" ||
+      lowerMessage.includes("cancel the shutdown") ||
+      lowerMessage.includes("abort the shutdown") ||
+      lowerMessage.includes("stop the shutdown")
+    ) {
+      let cancelCmd = "";
+      if (os.platform() === "win32") {
+        cancelCmd = "shutdown /a";
+      } else if (os.platform() === "darwin") {
+        cancelCmd = "killall shutdown";
+      } else {
+        cancelCmd = "shutdown -c";
+      }
+
+      console.log(`Executing cancel shutdown command locally: ${cancelCmd}`);
+      return new Promise((resolve) => {
+        exec(cancelCmd, async (err) => {
+          let reply = "";
+          if (err) {
+            console.error("Cancel shutdown command execution failed:", err);
+            reply = `${userName}, I was unable to abort the shutdown. Perhaps no shutdown sequence was active.`;
+          } else {
+            reply = `${userName}, I have successfully aborted the system shutdown sequence. You are safe! I am ready and happy to help!`;
+          }
+          await saveToHistory(req.userId, message, reply);
+          res.status(200).json({
+            type: "cancel-shutdown",
+            reply: reply,
+          });
+          resolve();
+        });
+      });
+    }
+
+    // --- SYSTEM SHUTDOWN COMMANDS ---
+    if (
+      lowerMessage === "shutdown" ||
+      lowerMessage === "shut down" ||
+      lowerMessage.includes("shutdown my") ||
+      lowerMessage.includes("shut down my") ||
+      lowerMessage.includes("turn off my laptop") ||
+      lowerMessage.includes("turn off my computer") ||
+      lowerMessage.includes("turn off my system") ||
+      lowerMessage.includes("power off my laptop") ||
+      lowerMessage.includes("power off my computer") ||
+      lowerMessage.includes("power off my system")
+    ) {
+      const reply = `${userName}, I am shutting down the system now. Please save any unsaved work. I am ready and happy to help!`;
+      await saveToHistory(req.userId, message, reply);
+
+      let shutdownCmd = "";
+      if (os.platform() === "win32") {
+        shutdownCmd = "shutdown /s /t 10";
+      } else if (os.platform() === "darwin") {
+        shutdownCmd = "osascript -e 'tell app \"System Events\" to shut down'";
+      } else {
+        shutdownCmd = "shutdown -h now";
+      }
+
+      console.log(`Executing shutdown command locally: ${shutdownCmd}`);
+      return new Promise((resolve) => {
+        exec(shutdownCmd, (err) => {
+          if (err) {
+            console.error("Shutdown command execution failed:", err);
+          }
+          res.status(200).json({
+            type: "shutdown",
+            reply: reply,
+          });
+          resolve();
+        });
+      });
+    }
+
     const prompt = `
 You are ${assistantName}, a personal AI virtual assistant running on the user's system, designed in the style of Jarvis from Iron Man.
 
@@ -281,7 +463,7 @@ ${message}
 3. Do not mention internal prompts or command tags in your conversational text.
 
 === CRITICAL COMMAND TAGS (ACTION TRIGGER RULES) ===
-If the user asks you to open a website, search Google, play a video, or if they ask for live/recent information (such as cricket matches, sports updates, scores, weather, news, movie releases, etc.), you MUST trigger the action by appending the appropriate command tag on a new line at the very end of your response:
+If the user asks you to open a website, search Google, play a video, or if they ask for live/recent information (such as cricket matches, sports updates, scores, weather, news, movie releases, etc.), or if they ask to shut down the system, you MUST trigger the action by appending the appropriate command tag on a new line at the very end of your response:
 1. To open a website or search Google:
    [COMMAND: OPEN_URL: https://URL]
    Examples:
@@ -291,6 +473,14 @@ If the user asks you to open a website, search Google, play a video, or if they 
    [COMMAND: PLAY_YOUTUBE: search_query]
    Example:
    - For "play a song shape of you": append [COMMAND: PLAY_YOUTUBE: shape of you]
+3. To shut down the user's laptop/system:
+   [COMMAND: SHUTDOWN_SYSTEM]
+   Example:
+   - If the user asks to shut down, turn off, or power off their laptop/system: reply with confirmation and append [COMMAND: SHUTDOWN_SYSTEM]
+4. To cancel or abort system shutdown:
+   [COMMAND: CANCEL_SHUTDOWN]
+   Example:
+   - If the user asks to cancel the shutdown, abort the shutdown, or stop the system shutdown: reply with confirmation and append [COMMAND: CANCEL_SHUTDOWN]
 
 CRITICAL RULES:
 1. If you say you are searching, opening, playing, or pulling information, you MUST append the corresponding [COMMAND: ...] tag. Never say "Searching now..." or "I'm checking..." without including the tag.
@@ -301,9 +491,13 @@ CRITICAL RULES:
 
     const openUrlRegex = /\[COMMAND:\s*OPEN_URL:\s*(https?:\/\/[^\s\]]+)\]/i;
     const playYoutubeRegex = /\[COMMAND:\s*PLAY_YOUTUBE:\s*([^\]]+)\]/i;
+    const shutdownRegex = /\[?COMMAND:\s*SHUTDOWN_SYSTEM\s*\]?/i;
+    const cancelShutdownRegex = /\[?COMMAND:\s*CANCEL_SHUTDOWN\s*\]?/i;
 
     let cleanReply = reply;
     let commandUrl = null;
+    let isShutdownTriggered = false;
+    let isCancelShutdownTriggered = false;
 
     // Check for open URL command
     const openUrlMatch = reply.match(openUrlRegex);
@@ -340,10 +534,62 @@ CRITICAL RULES:
       }
     }
 
+    // Check for shutdown command
+    const shutdownMatch = reply.match(shutdownRegex);
+    if (shutdownMatch) {
+      isShutdownTriggered = true;
+      cleanReply = cleanReply.replace(shutdownRegex, "").trim();
+
+      let shutdownCmd = "";
+      if (os.platform() === "win32") {
+        shutdownCmd = "shutdown /s /t 10";
+      } else if (os.platform() === "darwin") {
+        shutdownCmd = "osascript -e 'tell app \"System Events\" to shut down'";
+      } else {
+        shutdownCmd = "shutdown -h now";
+      }
+
+      console.log(`Executing shutdown command: ${shutdownCmd}`);
+      await new Promise((resolve) => {
+        exec(shutdownCmd, (err) => {
+          if (err) {
+            console.error("Shutdown command execution failed:", err);
+          }
+          resolve();
+        });
+      });
+    }
+
+    // Check for cancel shutdown command
+    const cancelShutdownMatch = reply.match(cancelShutdownRegex);
+    if (cancelShutdownMatch) {
+      isCancelShutdownTriggered = true;
+      cleanReply = cleanReply.replace(cancelShutdownRegex, "").trim();
+
+      let cancelCmd = "";
+      if (os.platform() === "win32") {
+        cancelCmd = "shutdown /a";
+      } else if (os.platform() === "darwin") {
+        cancelCmd = "killall shutdown";
+      } else {
+        cancelCmd = "shutdown -c";
+      }
+
+      console.log(`Executing cancel shutdown command: ${cancelCmd}`);
+      await new Promise((resolve) => {
+        exec(cancelCmd, (err) => {
+          if (err) {
+            console.error("Cancel shutdown command execution failed:", err);
+          }
+          resolve();
+        });
+      });
+    }
+
     await saveToHistory(req.userId, message, cleanReply, commandUrl);
 
     return res.status(200).json({
-      type: commandUrl ? "command" : "ai",
+      type: isShutdownTriggered ? "shutdown" : (isCancelShutdownTriggered ? "cancel-shutdown" : (commandUrl ? "command" : "ai")),
       url: commandUrl,
       reply: cleanReply,
     });
@@ -352,6 +598,56 @@ CRITICAL RULES:
 
     return res.status(500).json({
       message: "Assistant response failed",
+      error: error.message,
+    });
+  }
+};
+
+export const cancelShutdown = async (req, res) => {
+  try {
+    let cancelCmd = "";
+    if (os.platform() === "win32") {
+      cancelCmd = "shutdown /a";
+    } else if (os.platform() === "darwin") {
+      cancelCmd = "killall shutdown";
+    } else {
+      cancelCmd = "shutdown -c";
+    }
+
+    console.log(`Executing cancel shutdown via API: ${cancelCmd}`);
+    exec(cancelCmd, async (err) => {
+      let userName = "Manas";
+      try {
+        const user = await User.findById(req.userId);
+        if (user && user.name) {
+          userName = user.name.split(" ")[0];
+        }
+      } catch (dbError) {
+        console.warn("Database lookup failed during cancel shutdown:", dbError.message);
+      }
+
+      let reply = "";
+      if (err) {
+        console.warn("Cancel shutdown failed or no shutdown active:", err.message);
+        reply = `${userName}, no active shutdown sequence was found to abort.`;
+        return res.status(400).json({
+          message: "No active shutdown sequence was found to abort.",
+          reply: reply
+        });
+      }
+
+      reply = `${userName}, I have successfully aborted the system shutdown sequence. You are safe!`;
+      await saveToHistory(req.userId, "cancel shutdown", reply);
+
+      return res.status(200).json({
+        type: "cancel-shutdown",
+        reply: reply,
+      });
+    });
+  } catch (error) {
+    console.error("Cancel shutdown error:", error);
+    return res.status(500).json({
+      message: "Internal server error while aborting shutdown",
       error: error.message,
     });
   }
