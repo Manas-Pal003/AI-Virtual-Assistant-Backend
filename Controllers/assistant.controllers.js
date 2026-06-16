@@ -3,6 +3,9 @@ import YT from "youtube-sr";
 import User from "../Models/user.model.js";
 import { exec } from "child_process";
 import os from "os";
+import axios from "axios";
+import path from "path";
+import fs from "fs";
 const YouTube = YT.YouTube;
 
 const openUrl = (url) => {
@@ -28,6 +31,280 @@ const runShellCommand = (cmd) => {
         resolve(stdout.trim());
       }
     });
+  });
+};
+
+const getSystemInfo = async () => {
+  const cpu = os.cpus()[0]?.model?.trim() || "Unknown Processor";
+  const totalGb = Math.ceil(os.totalmem() / (1024 * 1024 * 1024));
+  const freeGb = (os.freemem() / (1024 * 1024 * 1024)).toFixed(1);
+
+  let osName = "Unknown OS";
+  let diskInfo = "";
+  let manufacturer = "Unknown Manufacturer";
+  let model = "Unknown Model";
+
+  if (os.platform() === "win32") {
+    try {
+      const psCommand = `@(Get-CimInstance Win32_ComputerSystem | Select-Object -Property Manufacturer, Model; Get-CimInstance Win32_OperatingSystem | Select-Object -Property Caption; Get-CimInstance Win32_LogicalDisk -Filter 'DeviceID=''C:''' | Select-Object -Property Size, FreeSpace) | ConvertTo-Json -Compress`;
+      const output = await runShellCommand(`powershell -Command "${psCommand}"`);
+      if (output) {
+        const data = JSON.parse(output);
+        if (Array.isArray(data) && data.length >= 3) {
+          manufacturer = data[0]?.Manufacturer?.trim() || "Unknown Manufacturer";
+          model = data[0]?.Model?.trim() || "Unknown Model";
+          osName = data[1]?.Caption?.trim() || "Microsoft Windows";
+          
+          const size = data[2]?.Size;
+          const freeSpace = data[2]?.FreeSpace;
+          if (size && freeSpace) {
+            const totalDisk = (parseInt(size, 10) / (1024 * 1024 * 1024)).toFixed(1);
+            const freeDisk = (parseInt(freeSpace, 10) / (1024 * 1024 * 1024)).toFixed(1);
+            diskInfo = `• Storage (Drive C): ${totalDisk} GB total, with ${freeDisk} GB free.`;
+          }
+        }
+      }
+    } catch (e) {
+      console.error("Failed to parse system info via PowerShell:", e);
+    }
+    
+    // Fallback if PowerShell output failed
+    if (osName === "Unknown OS") {
+      osName = "Windows Operating System";
+      const osCaption = await runShellCommand("wmic os get Caption /Value");
+      if (osCaption) {
+        const match = osCaption.match(/Caption=(.+)/i);
+        if (match) osName = match[1].trim();
+      }
+    }
+    if (!diskInfo) {
+      const diskOutput = await runShellCommand("wmic logicaldisk where \"DeviceID='C:'\" get FreeSpace,Size /Value");
+      if (diskOutput) {
+        const sizeMatch = diskOutput.match(/Size=(\d+)/i);
+        const freeMatch = diskOutput.match(/FreeSpace=(\d+)/i);
+        if (sizeMatch && freeMatch) {
+          const totalDisk = (parseInt(sizeMatch[1], 10) / (1024 * 1024 * 1024)).toFixed(1);
+          const freeDisk = (parseInt(freeMatch[1], 10) / (1024 * 1024 * 1024)).toFixed(1);
+          diskInfo = `• Storage (Drive C): ${totalDisk} GB total, with ${freeDisk} GB free.`;
+        }
+      }
+    }
+  } else if (os.platform() === "darwin") {
+    osName = "macOS " + (await runShellCommand("sw_vers -productVersion"));
+    manufacturer = "Apple Inc.";
+    model = await runShellCommand("sysctl -n hw.model");
+    
+    const dfOutput = await runShellCommand("df -h / | tail -1");
+    if (dfOutput) {
+      const parts = dfOutput.split(/\s+/);
+      if (parts.length >= 4) {
+        diskInfo = `• Storage: ${parts[1]} total, with ${parts[3]} free.`;
+      }
+    }
+  } else {
+    osName = "Linux " + (await runShellCommand("uname -r"));
+    manufacturer = (await runShellCommand("cat /sys/class/dmi/id/sys_vendor")) || "Unknown Manufacturer";
+    model = (await runShellCommand("cat /sys/class/dmi/id/product_name")) || "Unknown Model";
+    
+    const dfOutput = await runShellCommand("df -h / | tail -1");
+    if (dfOutput) {
+      const parts = dfOutput.split(/\s+/);
+      if (parts.length >= 4) {
+        diskInfo = `• Storage: ${parts[1]} total, with ${parts[3]} free.`;
+      }
+    }
+  }
+
+  return {
+    osName,
+    cpu,
+    totalGb,
+    freeGb,
+    diskInfo,
+    manufacturer,
+    model
+  };
+};
+
+const searchWeb = async (query) => {
+  try {
+    const url = "https://lite.duckduckgo.com/lite/";
+    const response = await axios.post(url, new URLSearchParams({ q: query }).toString(), {
+      headers: {
+        "Content-Type": "application/x-www-form-urlencoded",
+        "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+      },
+      timeout: 5000
+    });
+
+    const html = response.data;
+    const results = [];
+    const linkReg = /<a rel="nofollow" href="([^"]+)" class='result-link'>([\s\S]*?)<\/a>/g;
+    
+    let match;
+    while ((match = linkReg.exec(html)) !== null && results.length < 5) {
+      const href = match[1];
+      const title = match[2].replace(/<[^>]*>/g, "").trim();
+      
+      const searchStartIndex = match.index + match[0].length;
+      const snippetPart = html.substring(searchStartIndex, searchStartIndex + 1500);
+      const snippetMatch = snippetPart.match(/<td class='result-snippet'>([\s\S]*?)<\/td>/i);
+      
+      let snippet = "";
+      if (snippetMatch) {
+        snippet = snippetMatch[1].replace(/<[^>]*>/g, "").trim();
+      }
+      
+      results.push({ title, url: href, snippet });
+    }
+    return results;
+  } catch (error) {
+    console.error("DuckDuckGo search failed:", error.message);
+    return [];
+  }
+};
+
+const launchLocalApp = (appName) => {
+  const cleanApp = appName.toLowerCase().trim();
+  
+  // Folders mapping
+  const homeDir = os.homedir();
+  const foldersMapping = {
+    "downloads": path.join(homeDir, "Downloads"),
+    "download": path.join(homeDir, "Downloads"),
+    "downloads folder": path.join(homeDir, "Downloads"),
+    "download folder": path.join(homeDir, "Downloads"),
+    
+    "documents": path.join(homeDir, "Documents"),
+    "document": path.join(homeDir, "Documents"),
+    "documents folder": path.join(homeDir, "Documents"),
+    "document folder": path.join(homeDir, "Documents"),
+    
+    "desktop": path.join(homeDir, "Desktop"),
+    "desktop folder": path.join(homeDir, "Desktop"),
+    
+    "pictures": path.join(homeDir, "Pictures"),
+    "picture": path.join(homeDir, "Pictures"),
+    "pictures folder": path.join(homeDir, "Pictures"),
+    "picture folder": path.join(homeDir, "Pictures"),
+    
+    "music": path.join(homeDir, "Music"),
+    "music folder": path.join(homeDir, "Music"),
+    
+    "videos": path.join(homeDir, "Videos"),
+    "video": path.join(homeDir, "Videos"),
+    "videos folder": path.join(homeDir, "Videos"),
+    "video folder": path.join(homeDir, "Videos"),
+    
+    "home": homeDir,
+    "home folder": homeDir,
+    
+    "c drive": "C:\\",
+    "d drive": "D:\\",
+    "local disk c": "C:\\",
+    "local disk d": "D:\\"
+  };
+
+  const folderPath = foldersMapping[cleanApp];
+  if (folderPath) {
+    if (fs.existsSync(folderPath)) {
+      let execCmd = "";
+      if (os.platform() === "win32") {
+        execCmd = `start "" "${folderPath}"`;
+      } else if (os.platform() === "darwin") {
+        execCmd = `open "${folderPath}"`;
+      } else {
+        execCmd = `xdg-open "${folderPath}"`;
+      }
+      
+      console.log(`Attempting to open folder via: ${execCmd}`);
+      return new Promise((resolve) => {
+        exec(execCmd, (error) => {
+          if (error) {
+            console.error(`Failed to open folder: ${execCmd}`, error);
+            resolve(false);
+          } else {
+            resolve(true);
+          }
+        });
+      });
+    }
+    console.warn(`Folder path does not exist: ${folderPath}`);
+    return false;
+  }
+  
+  // Mapping of friendly names to execution commands/paths on Windows/Mac/Linux
+  const appMapping = {
+    "vs code": ["code", `${process.env.USERPROFILE}\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe`],
+    "vscode": ["code", `${process.env.USERPROFILE}\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe`],
+    "visual studio code": ["code", `${process.env.USERPROFILE}\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe`],
+    "notepad": ["notepad"],
+    "calculator": ["calc"],
+    "calc": ["calc"],
+    "cmd": ["cmd"],
+    "command prompt": ["cmd"],
+    "powershell": ["powershell"],
+    "chrome": ["chrome", "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"],
+    "google chrome": ["chrome", "C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe", "C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe"],
+    "edge": ["msedge"],
+    "microsoft edge": ["msedge"],
+    "explorer": ["explorer"],
+    "file explorer": ["explorer"],
+    "paint": ["mspaint"],
+    "mspaint": ["mspaint"],
+    "word": ["winword"],
+    "excel": ["excel"],
+    "powerpoint": ["powerpnt"],
+    "task manager": ["taskmgr"],
+    "taskmgr": ["taskmgr"],
+    "whatsapp": ["whatsapp://", "whatsapp"],
+    "spotify": ["spotify://", "spotify", `${process.env.USERPROFILE}\\AppData\\Roaming\\Spotify\\Spotify.exe`],
+    "discord": ["discord://", "discord", `${process.env.USERPROFILE}\\AppData\\Local\\Discord\\Update.exe --processStart Discord.exe`],
+    "telegram": ["tg://", "telegram"],
+    "notion": ["notion://", "notion"],
+    "figma": ["figma://", "figma"],
+    "canva": ["canva"]
+  };
+
+  // If we have a mapping, try those commands. Otherwise, try the app name directly.
+  const commands = appMapping[cleanApp] || [cleanApp];
+
+  return new Promise((resolve) => {
+    const tryLaunch = (index) => {
+      if (index >= commands.length) {
+        resolve(false);
+        return;
+      }
+      
+      const cmd = commands[index];
+      let execCmd = "";
+      if (os.platform() === "win32") {
+        execCmd = `start "" "${cmd}"`;
+      } else if (os.platform() === "darwin") {
+        const macMapping = {
+          "code": "Visual Studio Code",
+          "chrome": "Google Chrome",
+          "spotify": "Spotify",
+          "discord": "Discord"
+        };
+        const appNameMac = macMapping[cmd] || cmd;
+        execCmd = `open -a "${appNameMac}"`;
+      } else {
+        execCmd = `${cmd} &`;
+      }
+
+      console.log(`Attempting to launch local app via: ${execCmd}`);
+      exec(execCmd, (error) => {
+        if (error) {
+          console.warn(`Launch failed for: ${execCmd}. Trying next option...`);
+          tryLaunch(index + 1);
+        } else {
+          resolve(true);
+        }
+      });
+    };
+
+    tryLaunch(0);
   });
 };
 
@@ -63,6 +340,9 @@ export const askAssistant = async (req, res) => {
     }
 
     const lowerMessage = message.toLowerCase();
+
+    let searchResultsStr = "";
+    let searchUrl = null;
 
 
     // --- OPEN WEBSITE COMMANDS ---
@@ -102,21 +382,6 @@ export const askAssistant = async (req, res) => {
         puter: "https://puter.com",
       };
 
-      // Try to match a known website
-      for (const [name, url] of Object.entries(websites)) {
-        if (lowerMessage.includes(name)) {
-          const reply = `Opening ${name.charAt(0).toUpperCase() + name.slice(1)} for you.`;
-          await saveToHistory(req.userId, message, reply, url);
-          openUrl(url);
-          return res.status(200).json({
-            type: "command",
-            url: url,
-            reply: reply,
-          });
-        }
-      }
-
-      // Fallback: extract the site name and try to open it as a .com URL
       const siteName = message
         .replace(/open/gi, "")
         .replace(/please/gi, "")
@@ -125,6 +390,47 @@ export const askAssistant = async (req, res) => {
 
       if (siteName) {
         const cleanName = siteName.toLowerCase().replace(/\s+/g, "");
+        
+        // Check if this matches a local app mapping explicitly
+        const hasLocalAppMapping = [
+          "vs code", "vscode", "visual studio code", "notepad", "calculator", "calc", 
+          "cmd", "command prompt", "powershell", "chrome", "google chrome", "edge", 
+          "microsoft edge", "explorer", "file explorer", "paint", "mspaint", "word", 
+          "excel", "powerpoint", "task manager", "taskmgr", "spotify", "discord", 
+          "whatsapp", "telegram", "notion", "figma", "canva"
+        ].includes(siteName.toLowerCase().trim());
+
+        const isKnownWebsite = Object.keys(websites).some(key => cleanName === key || cleanName.includes(key));
+        
+        // Try to launch locally if it is explicitly mapped as a local app OR is not a known website
+        if (hasLocalAppMapping || !isKnownWebsite) {
+          console.log(`Attempting to launch local application/folder for "${siteName}"...`);
+          const launched = await launchLocalApp(siteName);
+          if (launched) {
+            const reply = `Opening ${siteName} on your system.`;
+            await saveToHistory(req.userId, message, reply);
+            return res.status(200).json({
+              type: "command",
+              reply: reply,
+            });
+          }
+        }
+
+        // Fallback 1: Try to match a known website mapping
+        for (const [name, url] of Object.entries(websites)) {
+          if (cleanName === name || cleanName.includes(name) || lowerMessage.includes(name)) {
+            const reply = `Opening ${name.charAt(0).toUpperCase() + name.slice(1)} for you.`;
+            await saveToHistory(req.userId, message, reply, url);
+            openUrl(url);
+            return res.status(200).json({
+              type: "command",
+              url: url,
+              reply: reply,
+            });
+          }
+        }
+
+        // Fallback 2: Default catch-all Web URL (.com)
         const reply = `Opening ${siteName} for you.`;
         const url = `https://www.${cleanName}.com`;
         await saveToHistory(req.userId, message, reply, url);
@@ -226,6 +532,32 @@ export const askAssistant = async (req, res) => {
       });
     }
 
+    // --- LIVE / REAL-TIME INFO INTERCEPT ---
+    const liveQueryRegex = /\b(weather|score|live score|news|headlines|next match|upcoming match|cricket match|football match|sports update|match schedule|points table|showtimes|movie release|upcoming movie)\b/i;
+    if (liveQueryRegex.test(lowerMessage)) {
+      console.log(`Live query detected: "${message}". Performing programmatic search...`);
+      const results = await searchWeb(message);
+      if (results && results.length > 0) {
+        searchUrl = `https://www.google.com/search?q=${encodeURIComponent(message.trim())}`;
+        searchResultsStr = `
+=== LIVE WEB SEARCH RESULTS ===
+The user's query required live/recent information. Here are real-time search results fetched from the web. Use these to answer the user's question directly, accurately, and conversationally in the chat:
+${results.map((r, i) => `[Result ${i+1}]\nTitle: ${r.title}\nSnippet: ${r.snippet}\nSource: ${r.url}`).join("\n\n")}
+`;
+      } else {
+        // Fallback: if search fails, open in Chrome automatically
+        const url = `https://www.google.com/search?q=${encodeURIComponent(message.trim())}`;
+        const reply = `Searching Google for "${message}" to get the latest real-time information.`;
+        await saveToHistory(req.userId, message, reply, url);
+        openUrl(url);
+        return res.status(200).json({
+          type: "command",
+          url: url,
+          reply: reply,
+        });
+      }
+    }
+
     const now = new Date();
     const dateStr = now.toLocaleDateString("en-IN", {
       weekday: "long",
@@ -295,55 +627,17 @@ export const askAssistant = async (req, res) => {
       lowerMessage.includes("device info") ||
       lowerMessage.includes("device details")
     ) {
-      const cpu = os.cpus()[0]?.model?.trim() || "Unknown Processor";
-      const totalGb = Math.ceil(os.totalmem() / (1024 * 1024 * 1024));
-      const freeGb = (os.freemem() / (1024 * 1024 * 1024)).toFixed(1);
-
-      let osName = "Windows Operating System";
-      if (os.platform() === "win32") {
-        const osCaption = await runShellCommand("wmic os get Caption /Value");
-        if (osCaption) {
-          const match = osCaption.match(/Caption=(.+)/i);
-          if (match) {
-            osName = match[1].trim();
-          }
-        }
-      } else if (os.platform() === "darwin") {
-        osName = "macOS " + (await runShellCommand("sw_vers -productVersion"));
-      } else {
-        osName = "Linux " + (await runShellCommand("uname -r"));
-      }
-
-      // Storage
-      let diskInfo = "";
-      if (os.platform() === "win32") {
-        const diskOutput = await runShellCommand("wmic logicaldisk where \"DeviceID='C:'\" get FreeSpace,Size /Value");
-        if (diskOutput) {
-          const sizeMatch = diskOutput.match(/Size=(\d+)/i);
-          const freeMatch = diskOutput.match(/FreeSpace=(\d+)/i);
-          if (sizeMatch && freeMatch) {
-            const totalDisk = (parseInt(sizeMatch[1], 10) / (1024 * 1024 * 1024)).toFixed(1);
-            const freeDisk = (parseInt(freeMatch[1], 10) / (1024 * 1024 * 1024)).toFixed(1);
-            diskInfo = `• Storage (Drive C): ${totalDisk} GB total, with ${freeDisk} GB free.`;
-          }
-        }
-      } else {
-        const dfOutput = await runShellCommand("df -h / | tail -1");
-        if (dfOutput) {
-          const parts = dfOutput.split(/\s+/);
-          if (parts.length >= 4) {
-            diskInfo = `• Storage: ${parts[1]} total, with ${parts[3]} free.`;
-          }
-        }
-      }
+      const sys = await getSystemInfo();
 
       let reply = `${userName}, here are the specifications of your laptop:\n`;
-      reply += `• Operating System: ${osName}\n`;
-      reply += `• Processor: ${cpu}\n`;
-      reply += `• Installed Memory: ${totalGb} GB of RAM (${freeGb} GB free)\n`;
-      if (diskInfo) {
-        reply += `${diskInfo}\n`;
+      reply += `• Operating System: ${sys.osName}\n`;
+      reply += `• Processor: ${sys.cpu}\n`;
+      reply += `• Installed Memory: ${sys.totalGb} GB of RAM (${sys.freeGb} GB free)\n`;
+      if (sys.diskInfo) {
+        reply += `${sys.diskInfo}\n`;
       }
+      reply += `• System Manufacturer: ${sys.manufacturer}\n`;
+      reply += `• System Model: ${sys.model}\n`;
       reply += `\nI am ready and happy to help!`;
 
       await saveToHistory(req.userId, message, reply);
@@ -430,12 +724,28 @@ export const askAssistant = async (req, res) => {
       });
     }
 
+    let sysInfoStr = "";
+    const systemKeywords = ["system", "pc", "laptop", "computer", "device", "spec", "storage", "disk", "ram", "memory", "hardware", "manufacturer", "model", "processor", "cpu", "os", "operating system"];
+    if (systemKeywords.some(keyword => lowerMessage.includes(keyword))) {
+      const sys = await getSystemInfo();
+      sysInfoStr = `
+=== USER SYSTEM INFORMATION ===
+Operating System: ${sys.osName}
+Processor: ${sys.cpu}
+Installed Memory (RAM): ${sys.totalGb} GB (${sys.freeGb} GB free)
+${sys.diskInfo ? sys.diskInfo : "Storage: Unknown"}
+System Manufacturer: ${sys.manufacturer}
+System Model: ${sys.model}
+`;
+    }
+
     const prompt = `
 You are ${assistantName}, a personal AI virtual assistant running on the user's system, designed in the style of Jarvis from Iron Man.
 
 You are loyal, witty, highly efficient, futuristic, calm under pressure, always ready to assist, and always address the user as "${userName}".
 You can help the user with general questions, web browsing, opening websites, playing music, searching information, managing files, controlling system actions, reading documents, analyzing screen content, and handling multi-step tasks.
-
+${sysInfoStr}
+${searchResultsStr}
 === CURRENT DATE & TIME LIVE FROM SERVER ===
 Today is ${dateStr}.
 Current time is ${timeStr} IST Indian Standard Time.
@@ -481,10 +791,15 @@ If the user asks you to open a website, search Google, play a video, or if they 
    [COMMAND: CANCEL_SHUTDOWN]
    Example:
    - If the user asks to cancel the shutdown, abort the shutdown, or stop the system shutdown: reply with confirmation and append [COMMAND: CANCEL_SHUTDOWN]
+5. To clear or delete the chat history:
+   [COMMAND: CLEAR_HISTORY]
+   Example:
+   - If the user asks to clear the chat, delete chat history, reset conversation, or confirms they want to clear history: reply with a friendly confirmation and append [COMMAND: CLEAR_HISTORY]
 
 CRITICAL RULES:
-1. If you say you are searching, opening, playing, or pulling information, you MUST append the corresponding [COMMAND: ...] tag. Never say "Searching now..." or "I'm checking..." without including the tag.
-2. If you are answering a general knowledge question (e.g. "Who is Iron Man?"), answer directly in plain text without appending any command tags.
+1. You MUST NOT hallucinate, guess, or make up real-time, current, or live information (e.g. current/upcoming sports matches, live scores, weather, news, schedules). Instead, reply that you are searching Google and append the corresponding [COMMAND: OPEN_URL: https://www.google.com/search?q=<query>] tag.
+2. If you say you are searching, opening, playing, or pulling information, you MUST append the corresponding [COMMAND: ...] tag. Never say "Searching now..." or "I'm checking..." without including the tag.
+3. If you are answering a general knowledge question (e.g. "Who is Iron Man?"), answer directly in plain text without appending any command tags.
 `;
 
     const reply = await aiResponse(prompt);
@@ -493,6 +808,7 @@ CRITICAL RULES:
     const playYoutubeRegex = /\[COMMAND:\s*PLAY_YOUTUBE:\s*([^\]]+)\]/i;
     const shutdownRegex = /\[?COMMAND:\s*SHUTDOWN_SYSTEM\s*\]?/i;
     const cancelShutdownRegex = /\[?COMMAND:\s*CANCEL_SHUTDOWN\s*\]?/i;
+    const clearHistoryRegex = /\[?COMMAND:\s*CLEAR_HISTORY\s*\]?/i;
 
     let cleanReply = reply;
     let commandUrl = null;
@@ -586,11 +902,33 @@ CRITICAL RULES:
       });
     }
 
-    await saveToHistory(req.userId, message, cleanReply, commandUrl);
+    // Check for clear history command
+    let isClearHistoryTriggered = false;
+    const clearHistoryMatch = reply.match(clearHistoryRegex);
+    if (clearHistoryMatch) {
+      isClearHistoryTriggered = true;
+      cleanReply = cleanReply.replace(clearHistoryRegex, "").trim();
+
+      try {
+        await User.findByIdAndUpdate(
+          req.userId,
+          { history: [] },
+          { bufferCommands: false }
+        );
+        console.log(`Successfully cleared chat history via voice/chat command for user: ${req.userId}`);
+      } catch (err) {
+        console.error("Failed to clear history in database:", err);
+      }
+    }
+
+    // If history is cleared, we don't save this message to history (otherwise it starts populating history again immediately)
+    if (!isClearHistoryTriggered) {
+      await saveToHistory(req.userId, message, cleanReply, commandUrl || searchUrl);
+    }
 
     return res.status(200).json({
-      type: isShutdownTriggered ? "shutdown" : (isCancelShutdownTriggered ? "cancel-shutdown" : (commandUrl ? "command" : "ai")),
-      url: commandUrl,
+      type: isShutdownTriggered ? "shutdown" : (isCancelShutdownTriggered ? "cancel-shutdown" : (isClearHistoryTriggered ? "clear-history" : (commandUrl ? "command" : "ai"))),
+      url: commandUrl || searchUrl,
       reply: cleanReply,
     });
   } catch (error) {
