@@ -1,6 +1,7 @@
 import User from "../Models/user.model.js";
 import bcrypt from "bcryptjs";
 import jwt from "jsonwebtoken";
+import axios from "axios";
 
 const generateToken = (userId) => {
   return jwt.sign(
@@ -228,6 +229,76 @@ export const googleMockLogin = async (req, res) => {
     return res.status(500).json({
       message: "Internal server error",
       error: error.message,
+    });
+  }
+};
+
+export const googleLogin = async (req, res) => {
+  try {
+    const { token } = req.body;
+
+    if (!token) {
+      return res.status(400).json({
+        message: "Google access token is required",
+      });
+    }
+
+    // Call Google's userinfo API to get profile info
+    const response = await axios.get("https://www.googleapis.com/oauth2/v3/userinfo", {
+      headers: {
+        Authorization: `Bearer ${token}`,
+      },
+    });
+
+    const { email, name, picture } = response.data;
+
+    if (!email) {
+      return res.status(400).json({
+        message: "Could not retrieve email from Google sign-in response",
+      });
+    }
+
+    let user = await User.findOne({ email });
+
+    if (!user) {
+      // Create user if not registered yet
+      const randomPassword = Math.random().toString(36).slice(-10);
+      const hashedPassword = await bcrypt.hash(randomPassword, 10);
+      user = await User.create({
+        name: name || email.split("@")[0],
+        email,
+        password: hashedPassword,
+        assistantName: "",
+        assistantImage: "",
+      });
+    }
+
+    const tokenPayload = generateToken(user._id);
+
+    res.cookie("token", tokenPayload, {
+      maxAge: 15 * 24 * 60 * 60 * 1000,
+      httpOnly: true,
+      sameSite: "lax",
+      secure: false,
+    });
+
+    return res.status(200).json({
+      message: "Google login successful",
+      user: {
+        _id: user._id,
+        name: user.name,
+        email: user.email,
+        role: user.role || "User",
+        assistantName: user.assistantName,
+        assistantImage: user.assistantImage,
+      },
+      token: tokenPayload,
+    });
+  } catch (error) {
+    console.error("Google authentication error:", error);
+    return res.status(500).json({
+      message: "Google authentication failed",
+      error: error.response?.data?.message || error.message,
     });
   }
 };

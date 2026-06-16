@@ -6,7 +6,11 @@ import os from "os";
 import axios from "axios";
 import path from "path";
 import fs from "fs";
+import { fileURLToPath } from "url";
 const YouTube = YT.YouTube;
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
 
 const openUrl = (url) => {
   // Try to open in Google Chrome first (since the user's project runs there).
@@ -22,6 +26,37 @@ const openUrl = (url) => {
   });
 };
 
+const setSystemVolume = (percentage) => {
+  const vol = Math.min(Math.max(parseInt(percentage, 10) || 0, 0), 100);
+  console.log(`Setting system volume to: ${vol}%`);
+
+  if (os.platform() === "win32") {
+    const scriptPath = path.join(__dirname, "../Scripts/set-volume.ps1");
+    const execCmd = `powershell -ExecutionPolicy Bypass -File "${scriptPath}" -Percent ${vol}`;
+    exec(execCmd, (error, stdout, stderr) => {
+      if (error) {
+        console.error("Failed to set system volume on Windows:", error);
+      } else {
+        console.log(`Windows volume set to ${vol}% successfully. Output: ${stdout.trim()}`);
+      }
+    });
+  } else if (os.platform() === "darwin") {
+    const execCmd = `osascript -e "set volume output volume ${vol}"`;
+    exec(execCmd, (error) => {
+      if (error) {
+        console.error("Failed to set system volume on macOS:", error);
+      }
+    });
+  } else {
+    const execCmd = `amixer set Master ${vol}% || pactl set-sink-volume @DEFAULT_SINK@ ${vol}%`;
+    exec(execCmd, (error) => {
+      if (error) {
+        console.error("Failed to set system volume on Linux:", error);
+      }
+    });
+  }
+};
+
 const runShellCommand = (cmd) => {
   return new Promise((resolve) => {
     exec(cmd, (error, stdout) => {
@@ -32,6 +67,77 @@ const runShellCommand = (cmd) => {
       }
     });
   });
+};
+
+const getBatteryInfo = async () => {
+  let percentage = null;
+  let isPluggedIn = null;
+  let remainingTime = null;
+
+  if (os.platform() === "win32") {
+    try {
+      const psCommand = `Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SystemInformation]::PowerStatus | Select-Object -Property PowerLineStatus, BatteryLifePercent, BatteryLifeRemaining | ConvertTo-Json`;
+      const output = await runShellCommand(`powershell -Command "${psCommand}"`);
+      if (output) {
+        const data = JSON.parse(output);
+        if (data.BatteryLifePercent !== undefined && data.BatteryLifePercent !== null) {
+          percentage = Math.round(data.BatteryLifePercent * 100);
+        }
+        if (data.PowerLineStatus === 1) {
+          isPluggedIn = true;
+        } else if (data.PowerLineStatus === 0) {
+          isPluggedIn = false;
+        }
+        if (data.BatteryLifeRemaining !== undefined && data.BatteryLifeRemaining > 0) {
+          remainingTime = Math.round(data.BatteryLifeRemaining / 60);
+        }
+      }
+    } catch (e) {
+      console.error("Failed to get battery info via PowerShell:", e);
+    }
+  } else if (os.platform() === "darwin") {
+    try {
+      const output = await runShellCommand("pmset -g batt");
+      if (output) {
+        const percentMatch = output.match(/(\d+)%/);
+        if (percentMatch) percentage = parseInt(percentMatch[1], 10);
+
+        isPluggedIn = output.includes("AC Power") || output.includes("charging");
+
+        const timeMatch = output.match(/(\d+):(\d+) remaining/);
+        if (timeMatch) {
+          remainingTime = parseInt(timeMatch[1], 10) * 60 + parseInt(timeMatch[2], 10);
+        }
+      }
+    } catch (e) {
+      console.error("Failed to get macOS battery info:", e);
+    }
+  } else {
+    try {
+      const output = await runShellCommand("upower -i $(upower -e | grep 'BAT')");
+      if (output) {
+        const percentMatch = output.match(/percentage:\s*(\d+)%/i);
+        if (percentMatch) percentage = parseInt(percentMatch[1], 10);
+
+        const stateMatch = output.match(/state:\s*(\S+)/i);
+        if (stateMatch) {
+          isPluggedIn = stateMatch[1].toLowerCase() === "charging" || stateMatch[1].toLowerCase() === "fully-charged";
+        }
+
+        const timeMatch = output.match(/time to empty:\s*([\d.]+)\s*(\S+)/i);
+        if (timeMatch) {
+          const val = parseFloat(timeMatch[1]);
+          const unit = timeMatch[2].toLowerCase();
+          if (unit.startsWith("hour")) remainingTime = Math.round(val * 60);
+          else if (unit.startsWith("min")) remainingTime = Math.round(val);
+        }
+      }
+    } catch (e) {
+      console.error("Failed to get Linux battery info:", e);
+    }
+  }
+
+  return { percentage, isPluggedIn, remainingTime };
 };
 
 const getSystemInfo = async () => {
@@ -115,6 +221,8 @@ const getSystemInfo = async () => {
     }
   }
 
+  const battery = await getBatteryInfo();
+
   return {
     osName,
     cpu,
@@ -122,7 +230,8 @@ const getSystemInfo = async () => {
     freeGb,
     diskInfo,
     manufacturer,
-    model
+    model,
+    battery
   };
 };
 
@@ -725,7 +834,7 @@ ${results.map((r, i) => `[Result ${i+1}]\nTitle: ${r.title}\nSnippet: ${r.snippe
     }
 
     let sysInfoStr = "";
-    const systemKeywords = ["system", "pc", "laptop", "computer", "device", "spec", "storage", "disk", "ram", "memory", "hardware", "manufacturer", "model", "processor", "cpu", "os", "operating system"];
+    const systemKeywords = ["system", "pc", "laptop", "computer", "device", "spec", "storage", "disk", "ram", "memory", "hardware", "manufacturer", "model", "processor", "cpu", "os", "operating system", "battery", "power"];
     if (systemKeywords.some(keyword => lowerMessage.includes(keyword))) {
       const sys = await getSystemInfo();
       sysInfoStr = `
@@ -737,6 +846,15 @@ ${sys.diskInfo ? sys.diskInfo : "Storage: Unknown"}
 System Manufacturer: ${sys.manufacturer}
 System Model: ${sys.model}
 `;
+      if (sys.battery && sys.battery.percentage !== null) {
+        sysInfoStr += `• Battery Status: ${sys.battery.percentage}% charge (${sys.battery.isPluggedIn ? "Plugged in, charging" : "On battery power, discharging"}).`;
+        if (sys.battery.remainingTime) {
+          sysInfoStr += ` Remaining run time: approximately ${sys.battery.remainingTime} minutes.`;
+        }
+        sysInfoStr += "\n";
+      } else {
+        sysInfoStr += "• Battery Status: No battery detected or system is on desktop power.\n";
+      }
     }
 
     const prompt = `
@@ -795,6 +913,12 @@ If the user asks you to open a website, search Google, play a video, or if they 
    [COMMAND: CLEAR_HISTORY]
    Example:
    - If the user asks to clear the chat, delete chat history, reset conversation, or confirms they want to clear history: reply with a friendly confirmation and append [COMMAND: CLEAR_HISTORY]
+6. To set, increase, decrease, or mute the system volume:
+   [COMMAND: SET_VOLUME: percentage]
+   Examples:
+   - For "increase my system volume 100%" or "set volume to 100": reply with confirmation and append [COMMAND: SET_VOLUME: 100]
+   - For "mute the volume" or "silence the laptop": reply with confirmation and append [COMMAND: SET_VOLUME: 0]
+   - For "set volume to 50%": reply with confirmation and append [COMMAND: SET_VOLUME: 50]
 
 CRITICAL RULES:
 1. You MUST NOT hallucinate, guess, or make up real-time, current, or live information (e.g. current/upcoming sports matches, live scores, weather, news, schedules). Instead, reply that you are searching Google and append the corresponding [COMMAND: OPEN_URL: https://www.google.com/search?q=<query>] tag.
@@ -809,11 +933,20 @@ CRITICAL RULES:
     const shutdownRegex = /\[?COMMAND:\s*SHUTDOWN_SYSTEM\s*\]?/i;
     const cancelShutdownRegex = /\[?COMMAND:\s*CANCEL_SHUTDOWN\s*\]?/i;
     const clearHistoryRegex = /\[?COMMAND:\s*CLEAR_HISTORY\s*\]?/i;
+    const setVolumeRegex = /\[?COMMAND:\s*SET_VOLUME:\s*(\d+)\s*\]?/i;
 
     let cleanReply = reply;
     let commandUrl = null;
     let isShutdownTriggered = false;
     let isCancelShutdownTriggered = false;
+
+    // Check for set volume command
+    const setVolumeMatch = reply.match(setVolumeRegex);
+    if (setVolumeMatch) {
+      const volPercent = setVolumeMatch[1];
+      setSystemVolume(volPercent);
+      cleanReply = cleanReply.replace(setVolumeRegex, "").trim();
+    }
 
     // Check for open URL command
     const openUrlMatch = reply.match(openUrlRegex);
