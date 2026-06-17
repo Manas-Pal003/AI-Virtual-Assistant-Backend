@@ -76,10 +76,14 @@ const getBatteryInfo = async () => {
 
   if (os.platform() === "win32") {
     try {
-      const psCommand = `Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SystemInformation]::PowerStatus | Select-Object -Property PowerLineStatus, BatteryLifePercent, BatteryLifeRemaining | ConvertTo-Json`;
+      const psCommand = `Add-Type -AssemblyName System.Windows.Forms; [System.Windows.Forms.SystemInformation]::PowerStatus | Select-Object -Property PowerLineStatus, BatteryChargeStatus, BatteryLifePercent, BatteryLifeRemaining | ConvertTo-Json`;
       const output = await runShellCommand(`powershell -Command "${psCommand}"`);
       if (output) {
         const data = JSON.parse(output);
+        // BatteryChargeStatus 128 indicates NoSystemBattery
+        if (data.BatteryChargeStatus === 128 || (data.BatteryChargeStatus & 128) === 128) {
+          return { percentage: null, isPluggedIn: null, remainingTime: null };
+        }
         if (data.BatteryLifePercent !== undefined && data.BatteryLifePercent !== null) {
           percentage = Math.round(data.BatteryLifePercent * 100);
         }
@@ -492,9 +496,10 @@ export const askAssistant = async (req, res) => {
       };
 
       const siteName = message
-        .replace(/open/gi, "")
-        .replace(/please/gi, "")
-        .replace(/for me/gi, "")
+        .replace(/\bopen\b/gi, "")
+        .replace(/\bplease\b/gi, "")
+        .replace(/\bfor me\b/gi, "")
+        .replace(/\s+/g, " ")
         .trim();
 
       if (siteName) {
@@ -561,13 +566,16 @@ export const askAssistant = async (req, res) => {
       (lowerMessage.includes("music") && !lowerMessage.includes("search"))
     ) {
       const songQuery = message
-        .replace(/play/gi, "")
-        .replace(/search/gi, "")
-        .replace(/a song for me/gi, "")
-        .replace(/on youtube/gi, "")
-        .replace(/youtube/gi, "")
-        .replace(/please/gi, "")
-        .replace(/for me/gi, "")
+        .replace(/\bplay\b/gi, "")
+        .replace(/\bplaying\b/gi, "")
+        .replace(/\bsearch\b/gi, "")
+        .replace(/\bsearching\b/gi, "")
+        .replace(/\ba song for me\b/gi, "")
+        .replace(/\bon youtube\b/gi, "")
+        .replace(/\byoutube\b/gi, "")
+        .replace(/\bplease\b/gi, "")
+        .replace(/\bfor me\b/gi, "")
+        .replace(/\s+/g, " ")
         .trim();
 
       if (songQuery) {
@@ -623,12 +631,13 @@ export const askAssistant = async (req, res) => {
       lowerMessage.includes("search on google")
     ) {
       const query = message
-        .replace(/google search/gi, "")
-        .replace(/search google/gi, "")
-        .replace(/search on google/gi, "")
-        .replace(/search for/gi, "")
-        .replace(/search/gi, "")
-        .replace(/google/gi, "")
+        .replace(/\bgoogle search\b/gi, "")
+        .replace(/\bsearch google\b/gi, "")
+        .replace(/\bsearch on google\b/gi, "")
+        .replace(/\bsearch for\b/gi, "")
+        .replace(/\bsearch\b/gi, "")
+        .replace(/\bgoogle\b/gi, "")
+        .replace(/\s+/g, " ")
         .trim();
       const reply = `Opening Google search for "${query}" right away.`;
       const url = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
@@ -701,6 +710,85 @@ ${results.map((r, i) => `[Result ${i+1}]\nTitle: ${r.title}\nSnippet: ${r.snippe
     }
 
     const userName = user?.name ? user.name.split(" ")[0] : "Manas";
+
+    // --- EMAIL COMMANDS ---
+    if (
+      lowerMessage.includes("send email") ||
+      lowerMessage.includes("send mail") ||
+      lowerMessage.includes("sending email") ||
+      lowerMessage.includes("sending mail") ||
+      lowerMessage.includes("compose email") ||
+      lowerMessage.includes("compose mail") ||
+      lowerMessage.includes("write email") ||
+      lowerMessage.includes("write mail") ||
+      lowerMessage.includes("email to") ||
+      lowerMessage.includes("mail to") ||
+      lowerMessage === "email" ||
+      lowerMessage === "mail" ||
+      /^(?:email|mail)\s+[a-zA-Z0-9@._-]+/i.test(lowerMessage)
+    ) {
+      let recipient = "";
+      let body = "";
+      let subject = "Message from " + userName;
+
+      const match = message.match(/(?:email|mail|compose\s+email|compose\s+mail|write\s+email|write\s+mail)(?:\s+to)?\s+([a-zA-Z0-9@._-]+)(?:\s+(?:saying|about|with|subject|body)\s+(.+))?/i);
+      if (match) {
+        recipient = match[1].trim();
+        if (match[2]) {
+          body = match[2].trim();
+        }
+      } else {
+        const toIndex = lowerMessage.indexOf(" to ");
+        if (toIndex !== -1) {
+          const afterTo = message.slice(toIndex + 4).trim();
+          const spaceIndex = afterTo.indexOf(" ");
+          if (spaceIndex !== -1) {
+            recipient = afterTo.slice(0, spaceIndex).trim();
+            body = afterTo.slice(spaceIndex + 1).trim();
+          } else {
+            recipient = afterTo;
+          }
+        }
+      }
+
+      let recipientEmail = recipient;
+      if (recipient && !recipient.includes("@")) {
+        try {
+          const allUsers = await User.find({}).setOptions({ bufferCommands: false });
+          const matchedUser = allUsers.find(u => {
+            const userNameLower = u.name.toLowerCase();
+            const searchNameLower = recipient.toLowerCase();
+            return userNameLower.includes(searchNameLower) || searchNameLower.includes(userNameLower);
+          });
+          if (matchedUser && matchedUser.email) {
+            recipientEmail = matchedUser.email;
+          } else {
+            if (!recipient.includes(".")) {
+              recipientEmail = `${recipient}@gmail.com`;
+            }
+          }
+        } catch (dbErr) {
+          console.warn("Database lookup failed for email recipient:", dbErr.message);
+          recipientEmail = `${recipient}@gmail.com`;
+        }
+      }
+
+      const gmailUrl = recipientEmail 
+        ? `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(recipientEmail)}&su=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
+        : `https://mail.google.com/mail/?view=cm&fs=1`;
+
+      const reply = recipientEmail 
+        ? `Opening Gmail compose page for ${recipient} (${recipientEmail}).` 
+        : `Opening Gmail compose page.`;
+
+      await saveToHistory(req.userId, message, reply, gmailUrl);
+      openUrl(gmailUrl);
+      return res.status(200).json({
+        type: "command",
+        url: gmailUrl,
+        reply: reply,
+      });
+    }
 
     // --- SYSTEM INFO COMMANDS (MEMORY/RAM) ---
     if (
