@@ -8,12 +8,12 @@ try {
     console.warn("Warning: Could not set DNS servers for MongoDB connection:", err);
 }
 
-mongoose.set('bufferCommands', false);
+mongoose.set('bufferCommands', true);
 
 const connectDB = async () => {
     try {
         await mongoose.connect(process.env.MONGODB_URL, {
-            serverSelectionTimeoutMS: 5000,
+            serverSelectionTimeoutMS: 30000,
         });
         console.log("Database Connected");
     } catch (error) {

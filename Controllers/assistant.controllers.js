@@ -13,17 +13,64 @@ const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
 const openUrl = (url) => {
-  // Try to open in Google Chrome first (since the user's project runs there).
-  // Fall back to the system default browser if Chrome is not available.
-  exec(`start chrome "${url}"`, (error) => {
-    if (error) {
-      exec(`start "" "${url}"`, (fallbackError) => {
-        if (fallbackError) {
-          console.error("Failed to open URL in fallback:", fallbackError);
+  const isWebUrl = url.startsWith("http://") || url.startsWith("https://");
+
+  if (isWebUrl) {
+    // Try to open in Google Chrome first (since the user's project runs there).
+    // Fall back to the system default browser if Chrome is not available.
+    exec(`start chrome "${url}"`, (error) => {
+      if (error) {
+        if (os.platform() === "win32") {
+          // Try standard installation paths for Chrome on Windows if "start chrome" fails
+          const chromePaths = [
+            `"${process.env.PROGRAMFILES}\\Google\\Chrome\\Application\\chrome.exe"`,
+            `"${process.env["PROGRAMFILES(X86)"]}\\Google\\Chrome\\Application\\chrome.exe"`,
+            `"${process.env.USERPROFILE}\\AppData\\Local\\Google\\Chrome\\Application\\chrome.exe"`
+          ];
+          
+          const tryChromePath = (index) => {
+            if (index >= chromePaths.length) {
+              // Fallback to system default browser
+              exec(`start "" "${url}"`, (err2) => {
+                if (err2) console.error("Failed to open URL in default browser:", err2);
+              });
+              return;
+            }
+            exec(`${chromePaths[index]} "${url}"`, (err) => {
+              if (err) {
+                tryChromePath(index + 1);
+              }
+            });
+          };
+          
+          tryChromePath(0);
+        } else if (os.platform() === "darwin") {
+          exec(`open -a "Google Chrome" "${url}" || open "${url}"`, (err) => {
+            if (err) console.error("Failed to open URL on macOS:", err);
+          });
+        } else {
+          exec(`google-chrome "${url}" || xdg-open "${url}"`, (err) => {
+            if (err) console.error("Failed to open URL on Linux:", err);
+          });
         }
+      }
+    });
+  } else {
+    // Open local file or deep link directly using the system default handler
+    if (os.platform() === "win32") {
+      exec(`start "" "${url}"`, (error) => {
+        if (error) console.error("Failed to open local path/link on Windows:", error);
+      });
+    } else if (os.platform() === "darwin") {
+      exec(`open "${url}"`, (error) => {
+        if (error) console.error("Failed to open local path/link on macOS:", error);
+      });
+    } else {
+      exec(`xdg-open "${url}"`, (error) => {
+        if (error) console.error("Failed to open local path/link on Linux:", error);
       });
     }
-  });
+  }
 };
 
 const setSystemVolume = (percentage) => {
@@ -55,6 +102,70 @@ const setSystemVolume = (percentage) => {
       }
     });
   }
+};
+
+const takeScreenshot = () => {
+  return new Promise((resolve) => {
+    const homeDir = os.homedir();
+    let picturesDir = path.join(homeDir, "Pictures");
+    if (!fs.existsSync(picturesDir)) {
+      picturesDir = homeDir;
+    }
+    
+    const screenshotsDir = path.join(picturesDir, "Screenshots");
+    if (!fs.existsSync(screenshotsDir)) {
+      try {
+        fs.mkdirSync(screenshotsDir, { recursive: true });
+      } catch (err) {
+        console.error("Failed to create Screenshots directory:", err);
+      }
+    }
+    
+    const targetDir = fs.existsSync(screenshotsDir) ? screenshotsDir : picturesDir;
+    const fileName = `Screenshot_${Date.now()}.png`;
+    const savePath = path.join(targetDir, fileName);
+
+    console.log(`Taking screenshot, saving to: ${savePath}`);
+
+    if (os.platform() === "win32") {
+      const scriptPath = path.join(__dirname, "../Scripts/take-screenshot.ps1");
+      const execCmd = `powershell -ExecutionPolicy Bypass -File "${scriptPath}" -SavePath "${savePath}"`;
+      exec(execCmd, (error) => {
+        if (error) {
+          console.error("Failed to take screenshot on Windows:", error);
+          resolve(null);
+        } else {
+          console.log("Screenshot taken successfully on Windows.");
+          openUrl(savePath);
+          resolve(savePath);
+        }
+      });
+    } else if (os.platform() === "darwin") {
+      const execCmd = `screencapture "${savePath}"`;
+      exec(execCmd, (error) => {
+        if (error) {
+          console.error("Failed to take screenshot on macOS:", error);
+          resolve(null);
+        } else {
+          console.log("Screenshot taken successfully on macOS.");
+          openUrl(savePath);
+          resolve(savePath);
+        }
+      });
+    } else {
+      const execCmd = `scrot "${savePath}" || gnome-screenshot -f "${savePath}"`;
+      exec(execCmd, (error) => {
+        if (error) {
+          console.error("Failed to take screenshot on Linux:", error);
+          resolve(null);
+        } else {
+          console.log("Screenshot taken successfully on Linux.");
+          openUrl(savePath);
+          resolve(savePath);
+        }
+      });
+    }
+  });
 };
 
 const runShellCommand = (cmd) => {
@@ -164,7 +275,7 @@ const getSystemInfo = async () => {
           manufacturer = data[0]?.Manufacturer?.trim() || "Unknown Manufacturer";
           model = data[0]?.Model?.trim() || "Unknown Model";
           osName = data[1]?.Caption?.trim() || "Microsoft Windows";
-          
+
           const size = data[2]?.Size;
           const freeSpace = data[2]?.FreeSpace;
           if (size && freeSpace) {
@@ -177,7 +288,7 @@ const getSystemInfo = async () => {
     } catch (e) {
       console.error("Failed to parse system info via PowerShell:", e);
     }
-    
+
     // Fallback if PowerShell output failed
     if (osName === "Unknown OS") {
       osName = "Windows Operating System";
@@ -203,7 +314,7 @@ const getSystemInfo = async () => {
     osName = "macOS " + (await runShellCommand("sw_vers -productVersion"));
     manufacturer = "Apple Inc.";
     model = await runShellCommand("sysctl -n hw.model");
-    
+
     const dfOutput = await runShellCommand("df -h / | tail -1");
     if (dfOutput) {
       const parts = dfOutput.split(/\s+/);
@@ -215,7 +326,7 @@ const getSystemInfo = async () => {
     osName = "Linux " + (await runShellCommand("uname -r"));
     manufacturer = (await runShellCommand("cat /sys/class/dmi/id/sys_vendor")) || "Unknown Manufacturer";
     model = (await runShellCommand("cat /sys/class/dmi/id/product_name")) || "Unknown Model";
-    
+
     const dfOutput = await runShellCommand("df -h / | tail -1");
     if (dfOutput) {
       const parts = dfOutput.split(/\s+/);
@@ -241,10 +352,9 @@ const getSystemInfo = async () => {
 
 const searchWeb = async (query) => {
   try {
-    const url = "https://lite.duckduckgo.com/lite/";
-    const response = await axios.post(url, new URLSearchParams({ q: query }).toString(), {
+    const url = `https://search.yahoo.com/search?p=${encodeURIComponent(query)}`;
+    const response = await axios.get(url, {
       headers: {
-        "Content-Type": "application/x-www-form-urlencoded",
         "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
       },
       timeout: 5000
@@ -252,34 +362,75 @@ const searchWeb = async (query) => {
 
     const html = response.data;
     const results = [];
-    const linkReg = /<a rel="nofollow" href="([^"]+)" class='result-link'>([\s\S]*?)<\/a>/g;
-    
-    let match;
-    while ((match = linkReg.exec(html)) !== null && results.length < 5) {
-      const href = match[1];
-      const title = match[2].replace(/<[^>]*>/g, "").trim();
-      
-      const searchStartIndex = match.index + match[0].length;
-      const snippetPart = html.substring(searchStartIndex, searchStartIndex + 1500);
-      const snippetMatch = snippetPart.match(/<td class='result-snippet'>([\s\S]*?)<\/td>/i);
-      
-      let snippet = "";
-      if (snippetMatch) {
-        snippet = snippetMatch[1].replace(/<[^>]*>/g, "").trim();
+
+    // Check if there is a weather info widget in the HTML
+    const weatherIndex = html.indexOf('class="dd weatherInfo');
+    if (weatherIndex !== -1) {
+      const range = html.substring(weatherIndex, weatherIndex + 15000);
+      let location = "";
+      const locMatch = range.match(/<h3[^>]*class="[^"]*fz-20[^"]*"[^>]*>([\s\S]*?)<\/h3>/i);
+      if (locMatch) {
+        location = locMatch[1].replace(/<[^>]*>/g, "").trim();
       }
-      
-      results.push({ title, url: href, snippet });
+
+      let condition = "";
+      const condMatch = range.match(/<p[^>]*class="[^"]*fc-charcoal[^"]*"[^>]*>([\s\S]*?)<\/p>/i);
+      if (condMatch) {
+        condition = condMatch[1].replace(/<[^>]*>/g, "").trim();
+      }
+
+      let tempC = "";
+      let tempF = "";
+      const tempMatch = range.match(/data-metric="([^"]+)"\s+data-imperial="([^"]+)"/i);
+      if (tempMatch) {
+        tempC = tempMatch[1];
+        tempF = tempMatch[2];
+      }
+
+      if (location && tempC) {
+        results.push({
+          title: `Current Weather in ${location}`,
+          url: `https://search.yahoo.com/search?p=${encodeURIComponent(query)}`,
+          snippet: `The current weather in ${location} is ${condition || "unknown conditions"}. The temperature is ${tempC}°C (${tempF}°F).`
+        });
+      }
+    }
+
+    const titleRegex = /<div class="[^"]*compTitle[^"]*">([\s\S]*?)<\/div>\s*<div class="[^"]*compText[^"]*">([\s\S]*?)<\/div>/gi;
+    let match;
+    while ((match = titleRegex.exec(html)) !== null && results.length < 5) {
+      const titleSection = match[1];
+      const textSection = match[2];
+
+      const hrefMatch = titleSection.match(/href="([^"]+)"/i);
+      let rawUrl = hrefMatch ? hrefMatch[1] : "";
+      let cleanUrl = rawUrl;
+      if (rawUrl.includes("/RU=")) {
+        try {
+          const ruPart = rawUrl.split("/RU=")[1].split("/")[0];
+          cleanUrl = decodeURIComponent(ruPart);
+        } catch (e) {
+          // fallback
+        }
+      }
+
+      const title = titleSection.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
+      const snippet = textSection.replace(/<[^>]*>/g, "").replace(/\s+/g, " ").trim();
+
+      if (title && cleanUrl && snippet && snippet !== "Show more") {
+        results.push({ title, url: cleanUrl, snippet });
+      }
     }
     return results;
   } catch (error) {
-    console.error("DuckDuckGo search failed:", error.message);
+    console.error("Yahoo search failed:", error.message);
     return [];
   }
 };
 
 const launchLocalApp = (appName) => {
   const cleanApp = appName.toLowerCase().trim();
-  
+
   // Folders mapping
   const homeDir = os.homedir();
   const foldersMapping = {
@@ -287,31 +438,31 @@ const launchLocalApp = (appName) => {
     "download": path.join(homeDir, "Downloads"),
     "downloads folder": path.join(homeDir, "Downloads"),
     "download folder": path.join(homeDir, "Downloads"),
-    
+
     "documents": path.join(homeDir, "Documents"),
     "document": path.join(homeDir, "Documents"),
     "documents folder": path.join(homeDir, "Documents"),
     "document folder": path.join(homeDir, "Documents"),
-    
+
     "desktop": path.join(homeDir, "Desktop"),
     "desktop folder": path.join(homeDir, "Desktop"),
-    
+
     "pictures": path.join(homeDir, "Pictures"),
     "picture": path.join(homeDir, "Pictures"),
     "pictures folder": path.join(homeDir, "Pictures"),
     "picture folder": path.join(homeDir, "Pictures"),
-    
+
     "music": path.join(homeDir, "Music"),
     "music folder": path.join(homeDir, "Music"),
-    
+
     "videos": path.join(homeDir, "Videos"),
     "video": path.join(homeDir, "Videos"),
     "videos folder": path.join(homeDir, "Videos"),
     "video folder": path.join(homeDir, "Videos"),
-    
+
     "home": homeDir,
     "home folder": homeDir,
-    
+
     "c drive": "C:\\",
     "d drive": "D:\\",
     "local disk c": "C:\\",
@@ -329,7 +480,7 @@ const launchLocalApp = (appName) => {
       } else {
         execCmd = `xdg-open "${folderPath}"`;
       }
-      
+
       console.log(`Attempting to open folder via: ${execCmd}`);
       return new Promise((resolve) => {
         exec(execCmd, (error) => {
@@ -345,7 +496,7 @@ const launchLocalApp = (appName) => {
     console.warn(`Folder path does not exist: ${folderPath}`);
     return false;
   }
-  
+
   // Mapping of friendly names to execution commands/paths on Windows/Mac/Linux
   const appMapping = {
     "vs code": ["code", `${process.env.USERPROFILE}\\AppData\\Local\\Programs\\Microsoft VS Code\\Code.exe`],
@@ -388,7 +539,7 @@ const launchLocalApp = (appName) => {
         resolve(false);
         return;
       }
-      
+
       const cmd = commands[index];
       let execCmd = "";
       if (os.platform() === "win32") {
@@ -458,106 +609,6 @@ export const askAssistant = async (req, res) => {
     let searchUrl = null;
 
 
-    // --- OPEN WEBSITE COMMANDS ---
-    if (lowerMessage.includes("open")) {
-      const websites = {
-        google: "https://www.google.com",
-        youtube: "https://www.youtube.com",
-        chatgpt: "https://chat.openai.com",
-        "chat gpt": "https://chat.openai.com",
-        gmail: "https://mail.google.com",
-        github: "https://github.com",
-        instagram: "https://www.instagram.com",
-        facebook: "https://www.facebook.com",
-        twitter: "https://x.com",
-        x: "https://x.com",
-        linkedin: "https://www.linkedin.com",
-        whatsapp: "https://web.whatsapp.com",
-        reddit: "https://www.reddit.com",
-        amazon: "https://www.amazon.in",
-        flipkart: "https://www.flipkart.com",
-        netflix: "https://www.netflix.com",
-        spotify: "https://open.spotify.com",
-        wikipedia: "https://www.wikipedia.org",
-        stackoverflow: "https://stackoverflow.com",
-        "stack overflow": "https://stackoverflow.com",
-        discord: "https://discord.com",
-        telegram: "https://web.telegram.org",
-        pinterest: "https://www.pinterest.com",
-        canva: "https://www.canva.com",
-        figma: "https://www.figma.com",
-        notion: "https://www.notion.so",
-        drive: "https://drive.google.com",
-        "google drive": "https://drive.google.com",
-        maps: "https://maps.google.com",
-        "google maps": "https://maps.google.com",
-        calendar: "https://calendar.google.com",
-        puter: "https://puter.com",
-      };
-
-      const siteName = message
-        .replace(/\bopen\b/gi, "")
-        .replace(/\bplease\b/gi, "")
-        .replace(/\bfor me\b/gi, "")
-        .replace(/\s+/g, " ")
-        .trim();
-
-      if (siteName) {
-        const cleanName = siteName.toLowerCase().replace(/\s+/g, "");
-        
-        // Check if this matches a local app mapping explicitly
-        const hasLocalAppMapping = [
-          "vs code", "vscode", "visual studio code", "notepad", "calculator", "calc", 
-          "cmd", "command prompt", "powershell", "chrome", "google chrome", "edge", 
-          "microsoft edge", "explorer", "file explorer", "paint", "mspaint", "word", 
-          "excel", "powerpoint", "task manager", "taskmgr", "spotify", "discord", 
-          "whatsapp", "telegram", "notion", "figma", "canva"
-        ].includes(siteName.toLowerCase().trim());
-
-        const isKnownWebsite = Object.keys(websites).some(key => cleanName === key || cleanName.includes(key));
-        
-        // Try to launch locally if it is explicitly mapped as a local app OR is not a known website
-        if (hasLocalAppMapping || !isKnownWebsite) {
-          console.log(`Attempting to launch local application/folder for "${siteName}"...`);
-          const launched = await launchLocalApp(siteName);
-          if (launched) {
-            const reply = `Opening ${siteName} on your system.`;
-            await saveToHistory(req.userId, message, reply);
-            return res.status(200).json({
-              type: "command",
-              reply: reply,
-            });
-          }
-        }
-
-        // Fallback 1: Try to match a known website mapping
-        for (const [name, url] of Object.entries(websites)) {
-          if (cleanName === name || cleanName.includes(name) || lowerMessage.includes(name)) {
-            const reply = `Opening ${name.charAt(0).toUpperCase() + name.slice(1)} for you.`;
-            await saveToHistory(req.userId, message, reply, url);
-            openUrl(url);
-            return res.status(200).json({
-              type: "command",
-              url: url,
-              reply: reply,
-            });
-          }
-        }
-
-        // Fallback 2: Default catch-all Web URL (.com)
-        const reply = `Opening ${siteName} for you.`;
-        const url = `https://www.${cleanName}.com`;
-        await saveToHistory(req.userId, message, reply, url);
-        openUrl(url);
-        return res.status(200).json({
-          type: "command",
-          url: url,
-          reply: reply,
-        });
-      }
-    }
-
-
     // --- PLAY SONG / VIDEO / SEARCH ON YOUTUBE ---
     if (
       lowerMessage.includes("play") ||
@@ -568,14 +619,21 @@ export const askAssistant = async (req, res) => {
       const songQuery = message
         .replace(/\bplay\b/gi, "")
         .replace(/\bplaying\b/gi, "")
+        .replace(/\bsearch for\b/gi, "")
         .replace(/\bsearch\b/gi, "")
+        .replace(/\bsearching for\b/gi, "")
         .replace(/\bsearching\b/gi, "")
         .replace(/\ba song for me\b/gi, "")
         .replace(/\bon youtube\b/gi, "")
         .replace(/\byoutube\b/gi, "")
+        .replace(/\bopen\b/gi, "")
+        .replace(/\band\b/gi, "")
+        .replace(/\bfor\b/gi, "")
         .replace(/\bplease\b/gi, "")
         .replace(/\bfor me\b/gi, "")
         .replace(/\s+/g, " ")
+        .trim()
+        .replace(/^[^\w\s]+|[^\w\s]+$/g, "")
         .trim();
 
       if (songQuery) {
@@ -624,11 +682,14 @@ export const askAssistant = async (req, res) => {
       }
     }
 
+
+    // --- GOOGLE SEARCH ---
     if (
       lowerMessage.startsWith("search ") ||
       lowerMessage.includes("google search") ||
       lowerMessage.includes("search google") ||
-      lowerMessage.includes("search on google")
+      lowerMessage.includes("search on google") ||
+      ((lowerMessage.includes("google") || lowerMessage.includes("chrome") || lowerMessage.includes("browser") || lowerMessage.includes("safari") || lowerMessage.includes("firefox") || lowerMessage.includes("edge")) && lowerMessage.includes("search"))
     ) {
       const query = message
         .replace(/\bgoogle search\b/gi, "")
@@ -637,7 +698,21 @@ export const askAssistant = async (req, res) => {
         .replace(/\bsearch for\b/gi, "")
         .replace(/\bsearch\b/gi, "")
         .replace(/\bgoogle\b/gi, "")
+        .replace(/\bchrome\b/gi, "")
+        .replace(/\bsafari\b/gi, "")
+        .replace(/\bfirefox\b/gi, "")
+        .replace(/\bedge\b/gi, "")
+        .replace(/\bbrowser\b/gi, "")
+        .replace(/\bopen\b/gi, "")
+        .replace(/\band\b/gi, "")
+        .replace(/\bfor me\b/gi, "")
+        .replace(/\bplease\b/gi, "")
+        .replace(/\bfor\b/gi, "")
+        .replace(/\bon\b/gi, "")
+        .replace(/\babout\b/gi, "")
         .replace(/\s+/g, " ")
+        .trim()
+        .replace(/^[^\w\s]+|[^\w\s]+$/g, "")
         .trim();
       const reply = `Opening Google search for "${query}" right away.`;
       const url = `https://www.google.com/search?q=${encodeURIComponent(query)}`;
@@ -650,17 +725,146 @@ export const askAssistant = async (req, res) => {
       });
     }
 
+
+    // --- OPEN WEBSITE COMMANDS ---
+    if (lowerMessage.includes("open")) {
+      const websites = {
+        google: "https://www.google.com",
+        youtube: "https://www.youtube.com",
+        chatgpt: "https://chat.openai.com",
+        "chat gpt": "https://chat.openai.com",
+        gmail: "https://mail.google.com",
+        github: "https://github.com",
+        instagram: "https://www.instagram.com",
+        facebook: "https://www.facebook.com",
+        twitter: "https://x.com",
+        x: "https://x.com",
+        linkedin: "https://www.linkedin.com",
+        whatsapp: "https://web.whatsapp.com",
+        reddit: "https://www.reddit.com",
+        amazon: "https://www.amazon.in",
+        flipkart: "https://www.flipkart.com",
+        netflix: "https://www.netflix.com",
+        spotify: "https://open.spotify.com",
+        wikipedia: "https://www.wikipedia.org",
+        stackoverflow: "https://stackoverflow.com",
+        "stack overflow": "https://stackoverflow.com",
+        discord: "https://discord.com",
+        telegram: "https://web.telegram.org",
+        pinterest: "https://www.pinterest.com",
+        canva: "https://www.canva.com",
+        figma: "https://www.figma.com",
+        notion: "https://www.notion.so",
+        drive: "https://drive.google.com",
+        "google drive": "https://drive.google.com",
+        maps: "https://maps.google.com",
+        "google maps": "https://maps.google.com",
+        calendar: "https://calendar.google.com",
+        puter: "https://puter.com",
+        "google chat": "https://chat.google.com",
+        "googlechat": "https://chat.google.com",
+        "google meet": "https://meet.google.com",
+        "googlemeet": "https://meet.google.com",
+      };
+
+      const siteName = message
+        .replace(/\bopen\b/gi, "")
+        .replace(/\bplease\b/gi, "")
+        .replace(/\bfor me\b/gi, "")
+        .replace(/\s+/g, " ")
+        .trim()
+        .replace(/^[^\w\s]+|[^\w\s]+$/g, "")
+        .trim();
+
+      if (siteName) {
+        const cleanName = siteName.toLowerCase().replace(/\s+/g, "");
+
+        // Check if this matches a local app mapping explicitly
+        const hasLocalAppMapping = [
+          "vs code", "vscode", "visual studio code", "notepad", "calculator", "calc",
+          "cmd", "command prompt", "powershell", "chrome", "google chrome", "edge",
+          "microsoft edge", "explorer", "file explorer", "paint", "mspaint", "word",
+          "excel", "powerpoint", "task manager", "taskmgr", "spotify", "discord",
+          "whatsapp", "telegram", "notion", "figma", "canva"
+        ].includes(siteName.toLowerCase().trim());
+
+        // Sort websites by key length descending to prevent shorter keys (like "google")
+        // from matching longer queries (like "google maps" or "google chat")
+        const sortedWebsites = Object.entries(websites).sort((a, b) => b[0].length - a[0].length);
+
+        const matchedEntry = sortedWebsites.find(([name]) => {
+          const cleanKey = name.toLowerCase().replace(/\s+/g, "");
+          return cleanName === cleanKey || cleanName.includes(cleanKey) || lowerMessage.includes(name.toLowerCase());
+        });
+
+        const isKnownWebsite = !!matchedEntry;
+
+        // Try to launch locally if it is explicitly mapped as a local app OR is not a known website
+        if (hasLocalAppMapping || !isKnownWebsite) {
+          console.log(`Attempting to launch local application/folder for "${siteName}"...`);
+          const launched = await launchLocalApp(siteName);
+          if (launched) {
+            const reply = `Opening ${siteName} on your system.`;
+            await saveToHistory(req.userId, message, reply);
+            return res.status(200).json({
+              type: "command",
+              reply: reply,
+            });
+          }
+        }
+
+        // Fallback 1: Try to match a known website mapping
+        if (matchedEntry) {
+          const [name, url] = matchedEntry;
+          const reply = `Opening ${name.charAt(0).toUpperCase() + name.slice(1)} for you.`;
+          await saveToHistory(req.userId, message, reply, url);
+          openUrl(url);
+          return res.status(200).json({
+            type: "command",
+            url: url,
+            reply: reply,
+          });
+        }
+
+        // Fallback 2: Default catch-all Web URL (.com)
+        const reply = `Opening ${siteName} for you.`;
+        const url = `https://www.${cleanName}.com`;
+        await saveToHistory(req.userId, message, reply, url);
+        openUrl(url);
+        return res.status(200).json({
+          type: "command",
+          url: url,
+          reply: reply,
+        });
+      }
+    }
+
     // --- LIVE / REAL-TIME INFO INTERCEPT ---
-    const liveQueryRegex = /\b(weather|score|live score|news|headlines|next match|upcoming match|cricket match|football match|sports update|match schedule|points table|showtimes|movie release|upcoming movie)\b/i;
+    const liveQueryRegex = /\b(weather|score|live score|news|headlines|next match|upcoming match|cricket match|football match|sports update|match schedule|points table|showtimes|movie release|upcoming movie|release date|release|released|releasing|comes out|coming out|debut|premiere|launch date|launching|launched|temperature)\b/i;
     if (liveQueryRegex.test(lowerMessage)) {
       console.log(`Live query detected: "${message}". Performing programmatic search...`);
-      const results = await searchWeb(message);
+      let searchQuery = message;
+      if (lowerMessage.includes("weather") || lowerMessage.includes("temp")) {
+        const hasCityIndicator = /\b(in|at|for|near)\b/i.test(lowerMessage);
+        if (!hasCityIndicator || lowerMessage.includes("outside") || lowerMessage.includes("today") || lowerMessage.split(" ").length <= 4) {
+          try {
+            const geoRes = await axios.get("http://ip-api.com/json", { timeout: 2000 });
+            if (geoRes.data && geoRes.data.status === "success" && geoRes.data.city) {
+              searchQuery = `${message} in ${geoRes.data.city}`;
+              console.log(`Geolocated user to: ${geoRes.data.city}. Updated search query: "${searchQuery}"`);
+            }
+          } catch (geoErr) {
+            console.warn("Geolocation lookup failed:", geoErr.message);
+          }
+        }
+      }
+      const results = await searchWeb(searchQuery);
       if (results && results.length > 0) {
         searchUrl = `https://www.google.com/search?q=${encodeURIComponent(message.trim())}`;
         searchResultsStr = `
 === LIVE WEB SEARCH RESULTS ===
 The user's query required live/recent information. Here are real-time search results fetched from the web. Use these to answer the user's question directly, accurately, and conversationally in the chat:
-${results.map((r, i) => `[Result ${i+1}]\nTitle: ${r.title}\nSnippet: ${r.snippet}\nSource: ${r.url}`).join("\n\n")}
+${results.map((r, i) => `[Result ${i + 1}]\nTitle: ${r.title}\nSnippet: ${r.snippet}\nSource: ${r.url}`).join("\n\n")}
 `;
       } else {
         // Fallback: if search fails, open in Chrome automatically
@@ -773,12 +977,12 @@ ${results.map((r, i) => `[Result ${i+1}]\nTitle: ${r.title}\nSnippet: ${r.snippe
         }
       }
 
-      const gmailUrl = recipientEmail 
+      const gmailUrl = recipientEmail
         ? `https://mail.google.com/mail/?view=cm&fs=1&to=${encodeURIComponent(recipientEmail)}&su=${encodeURIComponent(subject)}&body=${encodeURIComponent(body)}`
         : `https://mail.google.com/mail/?view=cm&fs=1`;
 
-      const reply = recipientEmail 
-        ? `Opening Gmail compose page for ${recipient} (${recipientEmail}).` 
+      const reply = recipientEmail
+        ? `Opening Gmail compose page for ${recipient} (${recipientEmail}).`
         : `Opening Gmail compose page.`;
 
       await saveToHistory(req.userId, message, reply, gmailUrl);
@@ -1007,6 +1211,10 @@ If the user asks you to open a website, search Google, play a video, or if they 
    - For "increase my system volume 100%" or "set volume to 100": reply with confirmation and append [COMMAND: SET_VOLUME: 100]
    - For "mute the volume" or "silence the laptop": reply with confirmation and append [COMMAND: SET_VOLUME: 0]
    - For "set volume to 50%": reply with confirmation and append [COMMAND: SET_VOLUME: 50]
+7. To take a screenshot of the user's screen:
+   [COMMAND: TAKE_SCREENSHOT]
+   Examples:
+   - For "take a screenshot" or "capture screen": reply with confirmation and append [COMMAND: TAKE_SCREENSHOT]
 
 CRITICAL RULES:
 1. You MUST NOT hallucinate, guess, or make up real-time, current, or live information (e.g. current/upcoming sports matches, live scores, weather, news, schedules). Instead, reply that you are searching Google and append the corresponding [COMMAND: OPEN_URL: https://www.google.com/search?q=<query>] tag.
@@ -1022,11 +1230,42 @@ CRITICAL RULES:
     const cancelShutdownRegex = /\[?COMMAND:\s*CANCEL_SHUTDOWN\s*\]?/i;
     const clearHistoryRegex = /\[?COMMAND:\s*CLEAR_HISTORY\s*\]?/i;
     const setVolumeRegex = /\[?COMMAND:\s*SET_VOLUME:\s*(\d+)\s*\]?/i;
+    const takeScreenshotRegex = /\[?COMMAND:\s*TAKE_SCREENSHOT\s*\]?/i;
 
     let cleanReply = reply;
     let commandUrl = null;
     let isShutdownTriggered = false;
     let isCancelShutdownTriggered = false;
+
+    // Check for take screenshot command
+    let isScreenshotTaken = false;
+    const takeScreenshotMatch = reply.match(takeScreenshotRegex);
+    if (takeScreenshotMatch) {
+      cleanReply = cleanReply.replace(takeScreenshotRegex, "").trim();
+      // Remove any hallucinated success lines from the LLM's raw text to prevent duplication
+      cleanReply = cleanReply.replace(/Screenshot successfully saved to:\s*[^\n]*/gi, "").trim();
+      const savePath = await takeScreenshot();
+      if (savePath) {
+        cleanReply += `\n\nScreenshot successfully saved to: ${savePath}`;
+        isScreenshotTaken = true;
+      } else {
+        cleanReply += `\n\nI was unable to capture the screenshot.`;
+      }
+    } else {
+      // Failsafe: check if the user asked to take a screenshot and we haven't taken it yet
+      const screenshotKeywords = /\b(screenshot|capture screen|screen capture|snapshot screen|take snapshot)\b/i;
+      if (screenshotKeywords.test(lowerMessage)) {
+        // Remove any hallucinated success lines from the LLM's raw text to prevent duplication
+        cleanReply = cleanReply.replace(/Screenshot successfully saved to:\s*[^\n]*/gi, "").trim();
+        const savePath = await takeScreenshot();
+        if (savePath) {
+          cleanReply += `\n\nScreenshot successfully saved to: ${savePath}`;
+          isScreenshotTaken = true;
+        } else {
+          cleanReply += `\n\nI was unable to capture the screenshot.`;
+        }
+      }
+    }
 
     // Check for set volume command
     const setVolumeMatch = reply.match(setVolumeRegex);
@@ -1043,6 +1282,9 @@ CRITICAL RULES:
       openUrl(url);
       commandUrl = url;
       cleanReply = cleanReply.replace(openUrlRegex, "").trim();
+    } else if (searchUrl) {
+      openUrl(searchUrl);
+      commandUrl = searchUrl;
     }
 
     // Check for play YouTube command
@@ -1141,6 +1383,8 @@ CRITICAL RULES:
         console.error("Failed to clear history in database:", err);
       }
     }
+
+    cleanReply = cleanReply.replace(/\n{3,}/g, "\n\n").trim();
 
     // If history is cleared, we don't save this message to history (otherwise it starts populating history again immediately)
     if (!isClearHistoryTriggered) {
